@@ -104,7 +104,7 @@ for i, (_, row) in enumerate(df_test.iterrows()):
     time.sleep(0.1)
 
 # ── 確認5筆沒問題後，跑全部 ───────────────────────────────
-input("\n5筆測試完成，按 Enter 繼續跑全部 2013 年資料...")
+input(f"\n5筆測試完成，按 Enter 繼續跑全部{year}年資料...")
 
 CHECKPOINT_FILE = f'checkpoint_{year}.xlsx'
 
