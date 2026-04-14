@@ -14,37 +14,39 @@ import json
 import time
 import random
 import html
-import openpyxl
+import os
 import pandas as pd
 import requests
 from openai import OpenAI
 from dotenv import load_dotenv
 
-load_dotenv()  # 讀取 .env 中的 OPENAI_API_KEY
+load_dotenv()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 設定區（依需求修改這裡）
 # ══════════════════════════════════════════════════════════════════════════════
 
-FILE_PATH   = 'DEF14A2023merged_Traning.xlsx'  # 放在同目錄下
+FILE_PATH   = 'CYZ_DEF14A.xlsx'
+SHEET_NAME  = 'DEF14A_06_25'
+YEAR        = 2023           # ← 修改這裡換年份
 
-# 取樣設定：
-#   SAMPLE_N = None  → 跑全部資料
-#   SAMPLE_N = 10    → 隨機抽 10 筆測試
-SAMPLE_N    = 10
-
-RANDOM_SEED = 42     # 固定取樣結果；改成 None 則每次不同
+SAMPLE_N    = None             # None = 跑全部；數字 = 隨機抽樣
+RANDOM_SEED = 42
 
 # ══════════════════════════════════════════════════════════════════════════════
 
 random.seed(RANDOM_SEED)
-client = OpenAI()  # 自動讀取環境變數 OPENAI_API_KEY
+client = OpenAI()
+
+CHECKPOINT_FILE = f'checkpoint_{YEAR}.xlsx'
+PROCESSED_FILE  = f'processed_{YEAR}.txt' 
+OUTPUT_FILE     = f'LLM分類結果_{YEAR}.xlsx'
+SAVE_EVERY      = 20
 
 # ══════════════════════════════════════════════════════════════════════════════
 # V5 粗篩 Regex
 # ══════════════════════════════════════════════════════════════════════════════
 
-# V5：廣泛關鍵字掃描（保留你原有的，修正 insider trading policy）
 V5_PATTERN = re.compile(
     r'pledg\w+|short\s+sale\w*|derivative'
     r'|margin\s+account'
@@ -54,52 +56,35 @@ V5_PATTERN = re.compile(
     r'|\bcollateral\b|\bmargin\s+loans?\b',
     re.IGNORECASE | re.DOTALL
 )
-# 注意：hedg\w+ 和 insider trading policy 移出來，
-#    改用下面有上下文的 pattern 處理，避免誤判
 
-# 需要上下文的 pattern
 CONTEXT_PATTERNS = {
     'hedg_with_context': re.compile(
-        r'\bprohibit\w*\s*[\S\s]*?\bhedg'   # prohibit + hedg
-        r'|\banti.?hedg'                     # anti-hedging
-        r'|\bhedg\w+.*\bpolic',              # hedging + policy
+        r'\bprohibit\w*\s*[\S\s]{0,500}?\bhedg'
+        r'|\banti.?hedg'
+        r'|\bhedg\w+.{0,500}?\bpolic',          # 修正 4：限制跨段距離
         re.IGNORECASE | re.DOTALL
     ),
     'insider_trading_policy': re.compile(
-        r'\binsider\s*trading\s*policy\b[\S\s]*?\b(pledg|hedg|prohibit)\b',
+        r'\binsider\s*trading\s*policy\b[\S\s]{0,500}?\b(pledg|hedg|prohibit)\b',
         re.IGNORECASE | re.DOTALL
     ),
     'policy_against': re.compile(
-        r'\b(policy|policies)\b[\S\s]*?\b(against|ban|restrict)\w*\b[\S\s]*?\b(pledg|hedg)\b',
+        r'\b(policy|policies)\b[\S\s]{0,500}?\b(against|ban|restrict)\w*\b[\S\s]{0,500}?\b(pledg|hedg)\b',
         re.IGNORECASE | re.DOTALL
     ),
     'ownership_guideline': re.compile(
-        r'\b(stock|equity)\s+ownership\s+guidelines?\b[\S\s]*?\b(pledg|hedg)\b',
+        r'\b(stock|equity)\s+ownership\s+guidelines?\b[\S\s]{0,500}?\b(pledg|hedg)\b',
         re.IGNORECASE | re.DOTALL
     ),
 }
-
-def classify_text(text: str) -> str | None:
-    # 先跑廣泛關鍵字
-    if V5_PATTERN.search(text):
-        return 'keyword_hit'
-    # 再跑需要上下文的條件
-    for hit_type, pattern in CONTEXT_PATTERNS.items():
-        if pattern.search(text):
-            return hit_type
-    return None  # 不輸出
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 工具函式
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_cell(row, idx):
-    v = row[idx].value
-    return str(v).strip() if v is not None else ""
 
 def fetch_html(url: str, timeout: int = 15) -> str:
-    """抓取 SEC HTM 文件，回傳原始 HTML"""
     try:
         resp = requests.get(
             url, timeout=timeout,
@@ -112,10 +97,6 @@ def fetch_html(url: str, timeout: int = 15) -> str:
         return ""
 
 def extract_relevant_passages(raw_html: str) -> str:
-    """
-    以 HTML 區塊標籤為單位切割文件，
-    對每個區塊的純文字跑 V5 Regex，命中的區塊完整保留。
-    """
     BLOCK_TAG_RE = re.compile(
         r'<(p|div|li|td|th|span|section|article)[^>]*>(.*?)</\1>',
         re.IGNORECASE | re.DOTALL
@@ -127,31 +108,24 @@ def extract_relevant_passages(raw_html: str) -> str:
         text = re.sub(r'\s+', ' ', text).strip()
         return text
 
-    seen_texts = set() 
+    seen_texts = set()
     passages   = []
 
     for m in BLOCK_TAG_RE.finditer(raw_html):
-        block_text = strip_tags(m.group(2)) 
-
-        if len(block_text) < 20: 
+        block_text = strip_tags(m.group(2))
+        if len(block_text) < 20:
             continue
         if not V5_PATTERN.search(block_text):
             continue
-
-        key = block_text[:120] #去重
+        key = block_text[:120]
         if key in seen_texts:
             continue
         seen_texts.add(key)
-
-        passages.append(block_text) 
+        passages.append(block_text)
 
     return "\n\n---\n\n".join(passages) if passages else ""
 
-def classify_with_llm(passages: str, cik: str, filedate: str) -> dict: 
-    """
-    呼叫 GPT-4o，同時判斷 is_Pledge2 / is_Pledge3 以及
-    各自的 breadth（涵蓋範圍）和 strength（禁止力道），回傳結構化 JSON。
-    """
+def classify_with_llm(passages: str, cik: str, filedate: str) -> dict:
     NULL_RESULT = {
         "is_Pledge2": -1, "is_Pledge3": -1,
         "Pledge2_breadth": None, "Pledge2_strength": None,
@@ -214,33 +188,33 @@ Respond ONLY with valid JSON, no markdown, no extra text:
 They were selected by a keyword filter (Regex) for relevance to pledging and hedging policies.
 
 --- EXTRACTED PASSAGES ---
-{passages[:8000]}  
+{passages[:8000]}
 --- END OF PASSAGES ---
 
 Based solely on the passages above, classify all fields."""
 
-    try:  
+    try:
         response = client.chat.completions.create(
             model="gpt-4o",
-            max_tokens=1000, # 足夠讓模型回傳完整 JSON
+            max_tokens=1000,
             messages=[
-                {"role": "system", "content": system_prompt},  
+                {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt}
             ],
-            temperature=0, # 固定輸出，避免同一文本每次不同
+            temperature=0,
         )
-        raw = response.choices[0].message.content.strip() 
-        raw = re.sub(r'^```json\s*', '', raw)  
+        raw = response.choices[0].message.content.strip()
+        raw = re.sub(r'^```json\s*', '', raw)
         raw = re.sub(r'\s*```$', '', raw)
 
         try:
-            return json.loads(raw)  # 嘗試解析 JSON
+            return json.loads(raw)
         except json.JSONDecodeError:
             def grab(pattern, text):
                 m = re.search(pattern, text)
                 return int(m.group(1)) if m else None
 
-            p2 = grab(r'"is_Pledge2"\s*:\s*([012])', raw)  # 嘗試用 Regex 抓關鍵欄位，看看能不能補救 JSON 解析失敗的情況
+            p2 = grab(r'"is_Pledge2"\s*:\s*([012])', raw)
             p3 = grab(r'"is_Pledge3"\s*:\s*([012])', raw)
             pb = grab(r'"Pledge2_breadth"\s*:\s*([123])', raw)
             ps = grab(r'"Pledge2_strength"\s*:\s*([123])', raw)
@@ -268,34 +242,16 @@ Based solely on the passages above, classify all fields."""
 # 讀取資料
 # ══════════════════════════════════════════════════════════════════════════════
 
-print("讀取資料中...")
-wb = openpyxl.load_workbook(FILE_PATH, read_only=True, data_only=True)
-sheet = wb.active
-headers = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))] 
+print(f"讀取資料中（篩選年份：{YEAR}）...")
+df = pd.read_excel(FILE_PATH, sheet_name=SHEET_NAME, index_col=None)
+df.columns = df.columns.str.strip()
+print(df.columns.tolist())
 
-def find_col(name):
-    try:
-        return headers.index(name)
-    except ValueError:
-        raise ValueError(f"找不到欄位「{name}」\n現有欄位：{headers}")
-
-idx_cik      = find_col('CIK')
-idx_filedate = find_col('FILEDATE')
-idx_http     = find_col('http')
-
-all_data = [] # 先讀取所有資料到 list，再轉 DataFrame，避免一次讀取大量資料導致記憶體問題
-for row in sheet.iter_rows(min_row=2): 
-    all_data.append({
-        'CIK':      get_cell(row, idx_cik),
-        'FILEDATE': get_cell(row, idx_filedate),
-        'http':     get_cell(row, idx_http),
-    })
-wb.close()
-
-df = pd.DataFrame(all_data)
-df = df[df['http'].str.startswith('http', na=False)].copy()
+# ── 篩選指定年份 ──────────────────────────────────────────
+df['FILEDATE'] = pd.to_datetime(df['FILEDATE'], format='%Y/%m/%d', errors='coerce')
+df = df[df['FILEDATE'].dt.year == YEAR].copy()
 df = df.reset_index(drop=True)
-print(f"有效筆數（含網址）：{len(df)}")
+print(f"{YEAR} 年有效筆數：{len(df)}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 取樣
@@ -308,45 +264,58 @@ else:
     samples = df.copy()
     print(f"執行全部 {len(df)} 筆")
 
-print(samples[['CIK', 'FILEDATE']].to_string())
+# ══════════════════════════════════════════════════════════════════════════════
+# 斷點續跑
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 載入已有結果
+if os.path.exists(CHECKPOINT_FILE):
+    df_done = pd.read_excel(CHECKPOINT_FILE)
+    results = df_done.to_dict('records')
+    print(f"讀取斷點，已有結果 {len(results)} 筆")
+else:
+    results = []
+
+# 載入已處理的 URL（成功 fetch 過的，無論有無命中）
+if os.path.exists(PROCESSED_FILE):
+    with open(PROCESSED_FILE, 'r') as f:
+        done_urls = set(f.read().splitlines())
+    print(f"已處理 URL：{len(done_urls)} 筆")
+else:
+    done_urls = set()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 主流程：fetch → Regex → LLM → 輸出
 # ══════════════════════════════════════════════════════════════════════════════
 
-results = [] # 最終結果列表，每筆是一個 dict，最後會轉成 DataFrame
+actual_count = 0
 
-for i, row in samples.iterrows(): 
+for i, row in samples.iterrows():
     cik      = row['CIK']
     filedate = row['FILEDATE']
-    url      = row['http']
+    url = row['filename']
+
+    if url in done_urls:
+        continue
 
     print(f"\n[{i+1}/{len(samples)}] CIK={cik} DATE={filedate}")
     print(f"  URL: {url}")
 
     # Step 1: 抓 SEC 文件
     raw_html = fetch_html(url)
-    if not raw_html: 
-        print("  → 抓取失敗，跳過")
-        results.append({
-            'CIK': cik, 'FILEDATE': filedate,
-            'AI_Pledge2': -1, 'AI_Pledge3': -1,  # 無法分類的預設值
-            'Pledge2_breadth': None, 'Pledge2_strength': None,
-            'Pledge3_breadth': None, 'Pledge3_strength': None,
-            'AI_依據文字': '文件抓取失敗',
-            'Regex命中區塊數': 0,
-            'Regex段落': '',
-        })
-        continue
+    if not raw_html:
+        print("  → 抓取失敗，跳過（下次重試）")
+        time.sleep(0.5)
+        continue                          # 不寫入 done_urls，下次重試
 
     # Step 2: Regex 粗篩
     passages  = extract_relevant_passages(raw_html)
-    hit_count = passages.count('\n\n---\n\n') + 1 if passages else 0 # 計算命中區塊數（以分隔符為基準）
+    hit_count = passages.count('\n\n---\n\n') + 1 if passages else 0
     print(f"  Regex 命中 {hit_count} 個區塊，擷取 {len(passages)} 字元")
 
     # Step 3: LLM 分類
     llm_result     = classify_with_llm(passages, cik, filedate)
-    ai_p2          = llm_result.get('is_Pledge2', -1) 
+    ai_p2          = llm_result.get('is_Pledge2', -1)
     ai_p3          = llm_result.get('is_Pledge3', -1)
     ai_p2_breadth  = llm_result.get('Pledge2_breadth', None)
     ai_p2_strength = llm_result.get('Pledge2_strength', None)
@@ -372,19 +341,28 @@ for i, row in samples.iterrows():
         'Regex段落':        passages[:6000],
     })
 
-    time.sleep(1)  # 避免 rate limit
+    # 標記為已處理
+    done_urls.add(url)
+    with open(PROCESSED_FILE, 'a') as f:
+        f.write(url + '\n')
+
+    actual_count += 1
+    time.sleep(1)
+
+    if actual_count % SAVE_EVERY == 0:
+        pd.DataFrame(results).to_excel(CHECKPOINT_FILE, index=False)
+        print(f"  已存斷點：實際處理 {actual_count} 筆")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 輸出結果
+# 最終輸出
 # ══════════════════════════════════════════════════════════════════════════════
 
 result_df = pd.DataFrame(results)
 
 print("\n" + "="*70)
-print("【分類結果摘要】")
+print(f"【{YEAR} 年分類結果摘要】")
 print("="*70)
 print(result_df[['CIK', 'FILEDATE', 'AI_Pledge2', 'AI_Pledge3']].to_string(index=False))
 
-out_path = 'LLM分類結果.xlsx'
-result_df.to_excel(out_path, index=False)
-print(f"\n結果已輸出至 {out_path}")
+result_df.to_excel(OUTPUT_FILE, index=False)
+print(f"\n結果已輸出至 {OUTPUT_FILE}")
