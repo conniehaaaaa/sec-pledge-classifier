@@ -30,7 +30,7 @@ FILE_PATH   = 'CYZ_DEF14A.xlsx'
 SHEET_NAME  = 'DEF14A_06_25'
 YEAR        = 2023           # ← 修改這裡換年份
 
-SAMPLE_N    = 10             # None = 跑全部；數字 = 隨機抽樣
+SAMPLE_N    = None             # None = 跑全部；數字 = 隨機抽樣
 RANDOM_SEED = 42
 
 # ══════════════════════════════════════════════════════════════════════════════
