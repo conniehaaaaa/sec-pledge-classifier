@@ -5,7 +5,7 @@ import requests
 import time
 from tqdm import tqdm
 
-year = 2006
+year = 2004
 # ── Patterns ──────────────────────────────────────────────
 V5_PATTERN = re.compile(
     r'pledg\w+|short\s+sale\w*|derivative'
@@ -76,36 +76,7 @@ df['filedate'] = pd.to_datetime(df['filedate'], errors='coerce')
 df_year = df[df['filedate'].dt.year == year].copy()
 print(f"{year}年筆數：{len(df_year)}")
 
-# ── 先試跑前5筆 ────────────────────────────────────────────
-df_test = df_year.head(5).copy()
-print(f"\n測試筆數：{len(df_test)}")
-print("-" * 80)
-
-for i, (_, row) in enumerate(df_test.iterrows()):
-    print(f"\n[{i+1}/5] CIK:{row['cik']} | {row['filedate'].date()}")
-    print(f"URL: {row['url']}")
-
-    text = fetch_text(row['url'])
-
-    if text is None:
-        print("下載失敗")
-        continue
-
-    print(f"下載成功，文字長度：{len(text):,} 字元")
-
-    hit_type, snippet = classify_text_with_match(text)
-
-    if hit_type:
-        print(f"命中：{hit_type}")
-        print(f"片段：...{snippet}...")
-    else:
-        print("未命中")
-
-    time.sleep(0.1)
-
-# ── 確認5筆沒問題後，跑全部 ───────────────────────────────
-input("\n5筆測試完成，按 Enter 繼續跑全部 2013 年資料...")
-
+# ── 斷點續跑 ───────────────────────────────────────────────
 CHECKPOINT_FILE = f'checkpoint_{year}.xlsx'
 
 if os.path.exists(CHECKPOINT_FILE):
