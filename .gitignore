@@ -1,0 +1,31 @@
+# 環境變數（含 API Key，絕對不能上傳）
+.env
+
+# 資料檔（不上傳原始資料）
+# *.xlsx
+*.xls
+*.csv
+
+# 輸出結果
+LLM分類結果.xlsx
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
