@@ -6,13 +6,13 @@ SEC DEF 14A 質押／避險政策分類器
 輸出欄位：
   CIK | FILEDATE | AI_Pledge2 | AI_Pledge3 |
   Pledge2_breadth | Pledge2_strength | Pledge3_breadth | Pledge3_strength |
-  AI_依據文字 | Regex命中區塊數 | Regex過濾後區塊數 | Regex段落
+  AI_依據文字 | Regex命中區塊數 | Regex段落
 
 修改紀錄：
   v2 - 新增段落噪音過濾器（DISCARD_PATTERN），修正 LLM system prompt false positive 規則
-  v3 - 補充 6 條 DISCARD_PATTERN（Fund Advisor 合約、REIT 投資限制、Shareholder/Member Agreement、
-       IPO lock-up Transfer Restriction、Loan Program 補版、X% Stockholder 股份限制）
-       補強 KEEP_OVERRIDE（加入 'it is our policy'）
+  v3 - 補充 6 條 DISCARD_PATTERN
+  v4 - 移除 DISCARD_PATTERN，改由 LLM system prompt 統一處理噪音判斷
+       好處：不需要再手動維護 Regex pattern，新年份遇到新噪音只需補充 prompt 描述
 """
 
 import re
@@ -50,7 +50,8 @@ OUTPUT_FILE     = f'LLM分類結果_{YEAR}.xlsx'
 SAVE_EVERY      = 20
 
 # ══════════════════════════════════════════════════════════════════════════════
-# V5 粗篩 Regex
+# Regex 粗篩（唯一用途：把完全沒有相關字眼的段落濾掉，降低送 LLM 的量）
+# 不做語意判斷，語意判斷全部交給 LLM
 # ══════════════════════════════════════════════════════════════════════════════
 
 V5_PATTERN = re.compile(
@@ -64,186 +65,121 @@ V5_PATTERN = re.compile(
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 段落噪音過濾器（Regex 命中後、送 LLM 前執行）
+# LLM System Prompt
 #
-# 凡符合以下任一 pattern 的段落視為噪音，直接丟棄，不送 LLM：
-#   1. 純揭露：「沒有人質押」→ 描述現狀，不是政策
-#   2. Equity award/grant plan 移轉限制 → 計畫層級，非 insider trading policy
-#   3. 基金資產質押限制（Fund's assets）→ 基金操作規定，非公司 insider policy
-#   4. Fund margin account 限制 → 同上
-#   5. LLC / Partnership Unit 移轉協議 → 非 insider trading policy
-#   6. Loan Program 質押條款 → 合約觸發條款，非禁止政策
-#   7. SPAC / lock-up 協議 → 不適用
-#   8. 明確說「不限制質押」→ 無政策
+# 核心設計：
+#   Step 1 — 讓 LLM 先判斷每個段落的「文件性質」，過濾噪音
+#   Step 2 — 只對真正是 insider trading policy 的段落進行分類
+#
+# 好處：遇到新的噪音類型，只需在 [NOISE TYPES] 下方加一行描述，不需要改 code
 # ══════════════════════════════════════════════════════════════════════════════
 
-DISCARD_PATTERN = re.compile(
-    # 1. 純揭露：「沒有 executive/director 質押」
-    r'no\s+(executive|director|officer|named\s+executive).{0,80}(pledged|margin)'
+SYSTEM_PROMPT = """You are an SEC DEF 14A analyst specializing in pledging and hedging policies.
 
-    # 2. Award/Grant 計畫層級移轉限制（unvested shares 禁止轉讓）
-    r'|(award|grant|RSU|option|restricted\s+stock).{0,120}'
-    r'(may\s+not|shall\s+not|not\s+be|cannot).{0,80}(pledg|transfer|assign|encumber)'
-    r'|(may\s+not|shall\s+not|cannot).{0,80}(sell|assign|transfer|pledge)'
-    r'.{0,80}(award|grant|RSU|restricted\s+stock|unvested)'
+════════════════════════════════════════════════════════════
+STEP 1 — FILTER: IS THIS PASSAGE FROM AN INSIDER TRADING POLICY?
+════════════════════════════════════════════════════════════
 
-    # 3. 基金資產質押
-    r'|fund.{0,60}(pledging|hypothecat|mortgag)'
-    r'|pledging.{0,60}fund.{0,30}assets'
+Before classifying, assess each passage. Only passages that come from a formal
+company-level insider trading policy, securities trading policy, or code of conduct
+that governs how individual insiders (employees, officers, directors) may trade
+company securities are relevant.
 
-    # 4. Fund margin account（帳戶名義為基金）
-    r'|no\s+margin\s+accounts?\s+(are\s+to\s+be|to\s+be)\s+maintained\s+in\s+the\s+name\s+of\s+the\s+fund'
+[NOISE TYPES] — The following are NOT insider trading policies. Ignore them entirely
+and treat them as if they do not exist when classifying:
 
-    # 5. LLC / Partnership Unit 移轉協議
-    r'|(section\s+\d+|unit\s+assignment\s+policy).{0,200}(pledge|transfer)\s+of.{0,30}units'
+  A. Ownership disclosure / current status
+     "X shares pledged as collateral" / "No executive has pledged any shares"
+     → Describes facts, not rules. Even a negative statement ("no one has pledged")
+       is a disclosure, not a prohibition.
 
-    # 6. Loan Program 質押觸發條款（原版：sells or pledges ... loan program）
-    r'|(sells?\s+or\s+pledges?|pledges?\s+or\s+sells?).{0,60}loan\s+program'
-    r'|loan\s+program.{0,200}(sells?\s+or\s+pledges?|pledges?\s+or\s+sells?)'
+  B. Equity award / stock plan transferability
+     "Participant may not sell, transfer, or pledge unvested RSUs/options/grants"
+     → Plan-level transfer restriction on unissued instruments. The subject is the
+       award itself, not the person's freely-held shares. NOT a trading policy.
 
-    # 7. SPAC / lock-up
-    r'|lock.?up.{0,80}(pledg|transfer)'
-    r'|sponsor.{0,60}(pledg|not\s+to\s+sell)'
+  C. Fund-level operating restrictions
+     "No margin accounts in the name of the Fund" / "Fund may not pledge its assets"
+     → Applies to the fund entity's assets, not to individual insiders. NOT a trading policy.
 
-    # 8. 明確說不限制
-    r'|do\s+not\s+restrict\s+pledges'
+  D. Investment advisory agreements (Fund Advisor contracts)
+     "The Advisor agrees that neither it nor its employees shall pledge the Fund's assets"
+     → Restricts the fund manager's use of fund assets, not personal securities trading.
 
-    # ── v3 新增 ──────────────────────────────────────────────────────────────
+  E. LLC / Partnership operating agreements
+     "Section 9 requires Director consent for any pledge of Units"
+     → Governs membership unit transfers within an LLC/partnership structure. NOT a trading policy.
 
-    # 9. Fund Advisor 合約：Advisor agrees ... pledge/borrow/short position ... Fund
-    r'|advisor\s+agrees.{0,150}(pledge|borrow|short\s+position).{0,100}fund'
+  F. Loan Program pledge clauses
+     "Interest rate adjusts if participant sells or pledges shares under the Loan Program"
+     → A loan contract trigger clause, not a prohibition on pledging.
 
-    # 10. REIT / 公司整體投資組合限制（Articles of Incorporation / Investment Restrictions）
-    r'|company\s+shall\s+not\s+make\s+investments\s+in.{0,150}short\s+sales'
+  G. SPAC / IPO lock-up / Transfer Restriction agreements
+     "Sponsors agreed not to pledge during lock-up"
+     "Transfer Restrictions: covered managing directors agree not to transfer shares until [date]"
+     → Contractual lock-up obligations tied to a specific event/date. NOT a company trading policy.
 
-    # 11. Shareholder / Member Agreement 移轉或質押禁止（合約條款，非 insider policy）
-    r'|(shareholder|member).{0,50}(shall\s+not|will\s+not|prohibited).{0,100}'
-    r'(encumber|pledg|transfer).{0,80}(stock|shares|units)'
+  H. REIT / company portfolio investment restrictions (Articles of Incorporation)
+     "The Company shall not make investments in: (i) foreign currency; (ii) short sales..."
+     → Restricts the company's own investment activity, not individual insider trading.
 
-    # 12. IPO lock-up / Transfer Restrictions：covered managing director + hedging
-    r'|transfer\s+restrictions?.{0,200}(covered\s+managing|managing\s+director)'
-    r'.{0,300}(hedg|short\s+sale|derivative)'
+  I. Shareholder / Member agreements
+     "Shareholder shall not encumber or pledge Stock except with written consent"
+     "5% Stockholder cannot purchase, sell, pledge... without Board approval"
+     → Contractual restrictions on specific shareholders, not a company insider trading policy.
 
-    # 13. Loan Program 補版：in the event a participant sells or pledges ... loan program
-    r'|in\s+the\s+event\s+a\s+participant\s+(sells|pledges).{0,100}loan\s+program'
+  J. Pre-clearance only, no prohibition
+     "We do not restrict pledges but require pre-clearance"
+     → Explicitly states no prohibition exists. No policy to classify.
 
-    # 14. X% Stockholder 持股移轉限制（非 insider trading policy）
-    r'|\d+%\s+stockholder\s+(cannot|may\s+not).{0,100}(pledge|sell|transfer)'
-    r'.{0,100}without.{0,50}(board|approval)',
+════════════════════════════════════════════════════════════
+STEP 2 — CLASSIFY: LABEL THE POLICY
+════════════════════════════════════════════════════════════
 
-    re.IGNORECASE | re.DOTALL
-)
+After filtering noise, classify based only on passages that are genuine insider
+trading / securities trading policies.
 
-# 白名單：就算觸發 DISCARD，只要同時出現正式政策語言，仍然保留
-KEEP_OVERRIDE = re.compile(
-    r'insider\s+trading\s+policy'
-    r'|securities\s+trading\s+policy'
-    r'|company\s+policy\s+prohibit'
-    r'|it\s+is\s+our\s+policy'                              # v3 新增
-    r'|board.{0,30}adopted.{0,60}(policy|guideline)'
-    r'|compensation\s+committee.{0,60}(policy|guideline|prohibit)',
-    re.IGNORECASE | re.DOTALL
-)
+--- LABELS ---
 
+is_Pledge2 (Anti-Pledging):
+  Does a formal policy prohibit insiders from pledging company shares as collateral?
 
-def should_discard_passage(text: str) -> bool:
-    """回傳 True 表示這段應該被丟棄（噪音）"""
-    if DISCARD_PATTERN.search(text):
-        if KEEP_OVERRIDE.search(text):
-            return False  # 白名單蓋過，保留
-        return True
-    return False
+is_Pledge3 (Anti-Hedging):
+  Does a formal policy prohibit insiders from hedging company securities
+  (e.g., short sales, collars, swaps, forwards, puts, calls)?
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# LLM System Prompt（已補強 false positive 規則）
-# ══════════════════════════════════════════════════════════════════════════════
-
-SYSTEM_PROMPT = """You are an SEC DEF 14A analyst. Classify pledging and hedging policies from the provided passages.
-
-=== LABELS ===
-
-is_Pledge2 (Anti-Pledging): Does a formal policy prohibit insiders from pledging company shares as collateral?
-is_Pledge3 (Anti-Hedging): Does a formal policy prohibit insiders from hedging company securities (e.g., short sales, collars, swaps, forwards)?
-  0 = No policy
+  0 = No policy found (or all passages were noise — see Step 1)
   1 = Strict prohibition, no exceptions
-  2 = Prohibited but exceptions/pre-approval permitted
+  2 = Prohibited but exceptions / pre-approval permitted
 
-=== CLASSIFICATION RULES ===
+--- RULES ---
 
-→ Label 1: passage explicitly says insiders are prohibited/may not/shall not pledge or hedge.
-  - Banning margin accounts = anti-pledging policy (label 1), even without the word "pledge."
+→ Label 1: passage explicitly says insiders are "prohibited," "may not," "shall not,"
+  "are not permitted" to pledge or hedge.
+  - Banning margin accounts = anti-pledging (label 1), even without the word "pledge."
 
-→ Label 2: prohibited BUT pre-approval or exceptions exist ("unless pre-approved," "subject to approval").
-  - Any mention of a pre-approval process = label 2, not 1.
-  - IMPORTANT: pre-clearance ALONE (without an explicit prohibition) is NOT label 2.
-    A passage saying only "transactions require pre-clearance" with no prohibition → label 0.
+→ Label 2: prohibited BUT a pre-approval or exception process exists
+  ("unless pre-approved," "subject to prior approval," "with General Counsel consent").
+  - Pre-approval process = label 2, not label 1.
+  - Pre-clearance ALONE with no prohibition language = label 0, not label 2.
 
-→ Label 0 — the following are NOT policies (common false positives — read carefully):
+→ Label 0: all passages were noise (Step 1), OR no prohibition language found.
 
-  A. Ownership disclosure / current status:
-     - "X shares pledged as collateral" → disclosure of current holdings, not a prohibition.
-     - "No executive officer has pledged any shares" → describes current status, NOT a policy.
-       Even though phrased negatively, it is still a factual disclosure, not a rule.
-
-  B. Equity award / stock plan transferability restrictions:
-     - "Participant may not sell, transfer, or pledge unvested awards/RSUs/options/grants" →
-       This is a plan-level transferability rule for unissued instruments, NOT a company insider
-       trading policy. Key signal: the subject is an "award," "grant," "RSU," "option," or
-       "restricted stock" and the restriction applies specifically to those instruments → label 0.
-
-  C. Fund-level operating restrictions:
-     - "No margin accounts to be maintained in the name of the Fund" → fund operating rule, not
-       an insider trading policy → label 0.
-     - "Fund may not pledge its assets" → same → label 0.
-
-  D. LLC / Partnership Unit transfer agreements:
-     - "Section 9 requires Director consent for any pledge of Units" → this is an LLC operating
-       agreement on member unit transfers, NOT a personal insider trading policy → label 0.
-
-  E. Loan Program pledge clauses:
-     - "Interest rate is adjusted if participant pledges shares purchased under the Loan Program" →
-       this is a loan contract term, not a prohibition on pledging → label 0.
-
-  F. SPAC / lock-up / IPO Transfer Restriction agreements:
-     - "Sponsors agreed not to sell or pledge shares during lock-up" → contractual lock-up,
-       NOT an insider trading policy → label 0.
-     - "Transfer Restrictions. Each covered managing director agrees not to transfer... including
-       short sales, hedging arrangements..." → IPO personal lock-up agreement, NOT a company
-       insider trading policy → label 0.
-
-  G. Fund Advisor contracts:
-     - "The Advisor agrees that neither it nor its employees shall pledge the Fund's assets" →
-       this is an investment advisory agreement restricting the fund manager's use of fund assets,
-       NOT a company insider trading policy → label 0.
-
-  H. REIT / company-level investment restrictions (Articles of Incorporation):
-     - "The Company shall not make investments in: (i) foreign currency; (ii) short sales..." →
-       this restricts the company's investment portfolio, NOT individual insider trading → label 0.
-
-  I. Shareholder / Member agreements:
-     - "Shareholder shall not encumber or pledge any Stock except upon written consent" →
-       this is a shareholder agreement clause, NOT an insider trading policy → label 0.
-     - "5% Stockholder cannot purchase, sell, pledge... without Board approval" →
-       ownership transfer restriction for large holders, NOT an insider trading policy → label 0.
-
-  J. Explicit statement of no restriction:
-     - "We do not restrict pledges but require pre-clearance" → explicitly says no restriction
-       exists → label 0.
-
-=== POLICY QUALITY (only when is_Pledge2 or is_Pledge3 >= 1; else null) ===
+--- POLICY QUALITY (only fill when is_Pledge2 or is_Pledge3 ≥ 1; else null) ---
 
 breadth — who is covered?
   1 = All employees / firm-wide
   2 = Directors and executive officers / senior management only
-  3 = Narrow group only (NEOs, specific individuals)
+  3 = Narrow group only (NEOs, specific named individuals)
 
 strength — how binding is the language?
-  1 = Strong: "prohibited," "may not," "shall not," "are not permitted"
+  1 = Strong:   "prohibited," "may not," "shall not," "are not permitted"
   2 = Moderate: "generally prohibits," "not permitted without approval," "subject to pre-clearance"
-  3 = Weak: "discouraged," "should not," "not recommended"
+  3 = Weak:     "discouraged," "should not," "not recommended"
 
-=== OUTPUT ===
+════════════════════════════════════════════════════════════
+OUTPUT
+════════════════════════════════════════════════════════════
 
 Respond ONLY with valid JSON, no markdown, no extra text:
 {
@@ -253,14 +189,13 @@ Respond ONLY with valid JSON, no markdown, no extra text:
   "Pledge2_strength": <1|2|3|null>,
   "Pledge3_breadth": <1|2|3|null>,
   "Pledge3_strength": <1|2|3|null>,
-  "evidence": "<up to 3 key sentences separated by | >"
+  "evidence": "<key sentence(s) from the actual policy, up to 3, separated by | . Write NONE if all passages were noise.>"
 }"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 工具函式
 # ══════════════════════════════════════════════════════════════════════════════
-
 
 def fetch_html(url: str, timeout: int = 15) -> str:
     try:
@@ -275,9 +210,10 @@ def fetch_html(url: str, timeout: int = 15) -> str:
         return ""
 
 
-def extract_relevant_passages(raw_html: str) -> tuple[str, int, int]:
+def extract_relevant_passages(raw_html: str) -> tuple[str, int]:
     """
-    回傳 (filtered_passages_str, regex_hit_count, after_filter_count)
+    Regex 粗篩：只負責找有關鍵字的段落，不做語意過濾
+    回傳 (passages_str, hit_count)
     """
     BLOCK_TAG_RE = re.compile(
         r'<(p|div|li|td|th|span|section|article)[^>]*>(.*?)</\1>',
@@ -290,9 +226,8 @@ def extract_relevant_passages(raw_html: str) -> tuple[str, int, int]:
         text = re.sub(r'\s+', ' ', text).strip()
         return text
 
-    seen_texts  = set()
-    regex_hits  = []
-    kept        = []
+    seen_texts = set()
+    kept       = []
 
     for m in BLOCK_TAG_RE.finditer(raw_html):
         block_text = strip_tags(m.group(2))
@@ -304,18 +239,10 @@ def extract_relevant_passages(raw_html: str) -> tuple[str, int, int]:
         if key in seen_texts:
             continue
         seen_texts.add(key)
-        regex_hits.append(block_text)
+        kept.append(block_text)
 
-    regex_hit_count = len(regex_hits)
-
-    # 噪音過濾
-    for passage in regex_hits:
-        if should_discard_passage(passage):
-            continue
-        kept.append(passage)
-
-    filtered_passages = "\n\n---\n\n".join(kept) if kept else ""
-    return filtered_passages, regex_hit_count, len(kept)
+    passages = "\n\n---\n\n".join(kept) if kept else ""
+    return passages, len(kept)
 
 
 def classify_with_llm(passages: str, cik: str, filedate: str) -> dict:
@@ -329,14 +256,19 @@ def classify_with_llm(passages: str, cik: str, filedate: str) -> dict:
     if not passages.strip():
         return NULL_RESULT
 
-    user_prompt = f"""The following passages were extracted from the DEF 14A proxy statement filed by CIK={cik} on {filedate}.
-They were selected by a keyword filter (Regex) for relevance to pledging and hedging policies.
+    user_prompt = f"""The following passages were extracted from the DEF 14A proxy statement
+filed by CIK={cik} on {filedate}.
+
+They were selected by a keyword filter (Regex) for containing words like
+"pledge," "hedge," "margin," "derivative," "short sale," or "collateral."
+The passages may include both genuine insider trading policies AND noise
+(disclosures, plan documents, fund agreements, etc.).
+
+Please apply Step 1 (filter noise) and Step 2 (classify) as instructed.
 
 --- EXTRACTED PASSAGES ---
 {passages[:8000]}
---- END OF PASSAGES ---
-
-Based solely on the passages above, classify all fields."""
+--- END OF PASSAGES ---"""
 
     try:
         response = client.chat.completions.create(
@@ -350,11 +282,10 @@ Based solely on the passages above, classify all fields."""
         )
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r'^```json\s*', '', raw)
-        raw = re.sub(r'\s*```$', '', raw)
+        raw = re.sub(r'\s*```$',     '', raw)
 
         try:
             result = json.loads(raw)
-            # evidence 保底：確保不會是 None/空
             if not result.get('evidence'):
                 result['evidence'] = '[LLM returned no evidence]'
             return result
@@ -433,7 +364,7 @@ else:
     done_urls = set()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 主流程：fetch → Regex → 噪音過濾 → LLM → 輸出
+# 主流程：fetch → Regex 粗篩 → LLM（含噪音過濾＋分類）→ 輸出
 # ══════════════════════════════════════════════════════════════════════════════
 
 actual_count = 0
@@ -456,11 +387,11 @@ for i, row in samples.iterrows():
         time.sleep(0.5)
         continue
 
-    # Step 2: Regex 粗篩 + 噪音過濾
-    passages, regex_hit_count, kept_count = extract_relevant_passages(raw_html)
-    print(f"  Regex 命中 {regex_hit_count} 個區塊 → 噪音過濾後保留 {kept_count} 個，擷取 {len(passages)} 字元")
+    # Step 2: Regex 粗篩（只找關鍵字段落，不做語意過濾）
+    passages, hit_count = extract_relevant_passages(raw_html)
+    print(f"  Regex 命中 {hit_count} 個區塊，擷取 {len(passages)} 字元")
 
-    # Step 3: LLM 分類
+    # Step 3: LLM（自行過濾噪音 + 分類）
     llm_result     = classify_with_llm(passages, cik, filedate)
     ai_p2          = llm_result.get('is_Pledge2', -1)
     ai_p3          = llm_result.get('is_Pledge3', -1)
@@ -475,18 +406,17 @@ for i, row in samples.iterrows():
     print(f"  依據: {evidence[:120]}")
 
     results.append({
-        'CIK':               cik,
-        'FILEDATE':          filedate,
-        'AI_Pledge2':        ai_p2,
-        'AI_Pledge3':        ai_p3,
-        'Pledge2_breadth':   ai_p2_breadth,
-        'Pledge2_strength':  ai_p2_strength,
-        'Pledge3_breadth':   ai_p3_breadth,
-        'Pledge3_strength':  ai_p3_strength,
-        'AI_依據文字':       evidence,
-        'Regex命中區塊數':   regex_hit_count,
-        'Regex過濾後區塊數': kept_count,     # 新增欄位：方便事後診斷過濾率
-        'Regex段落':         passages[:6000],
+        'CIK':              cik,
+        'FILEDATE':         filedate,
+        'AI_Pledge2':       ai_p2,
+        'AI_Pledge3':       ai_p3,
+        'Pledge2_breadth':  ai_p2_breadth,
+        'Pledge2_strength': ai_p2_strength,
+        'Pledge3_breadth':  ai_p3_breadth,
+        'Pledge3_strength': ai_p3_strength,
+        'AI_依據文字':      evidence,
+        'Regex命中區塊數':  hit_count,
+        'Regex段落':        passages[:6000],
     })
 
     done_urls.add(url)
