@@ -13,7 +13,9 @@ SEC DEF 14A 質押／避險政策分類器
   v3 - 補充 6 條 DISCARD_PATTERN
   v4 - 移除 DISCARD_PATTERN，改由 LLM system prompt 統一處理噪音判斷
        好處：不需要再手動維護 Regex pattern，新年份遇到新噪音只需補充 prompt 描述
-  v5 - 修正 prompt 中 G、H、I、J 四條噪音規則，避免誤將 label 1/2 當成噪音略過
+  v5 - 修正 prompt 中 G、H、I、J 四條噪音規則
+  v6 - 將 A-J 十條細則收斂為兩條核心原則（Filter 1: 對象是誰、Filter 2: 是規定還是事實）
+       大幅簡化 prompt，降低錯殺忠臣的風險
 """
 
 import re
@@ -78,89 +80,42 @@ V5_PATTERN = re.compile(
 SYSTEM_PROMPT = """You are an SEC DEF 14A analyst specializing in pledging and hedging policies.
 
 ════════════════════════════════════════════════════════════
-STEP 1 — FILTER: IS THIS PASSAGE FROM AN INSIDER TRADING POLICY?
+STEP 1 — FILTER: IS THIS A RELEVANT PASSAGE?
 ════════════════════════════════════════════════════════════
 
-Before classifying, assess each passage. Only passages that come from a formal
-company-level insider trading policy, securities trading policy, or code of conduct
-that governs how individual insiders (employees, officers, directors) may trade
-company securities are relevant.
+The passages you receive were pulled by a keyword search and may contain noise.
+Before classifying, apply these two filters. If EITHER filter applies, ignore the
+passage entirely — treat it as if it does not exist.
 
-[NOISE TYPES] — The following are NOT insider trading policies. Ignore them entirely
-and treat them as if they do not exist when classifying:
+FILTER 1 — Wrong subject: the restriction does not apply to individual insiders.
+  A relevant passage restricts what individual insiders (employees, officers,
+  directors) may do with their own company securities.
+  IGNORE a passage if the subject is any of the following instead:
+    • The company itself  (e.g., "The Company shall not invest in short sales...")
+    • A fund entity       (e.g., "The Fund may not pledge its assets...")
+    • Unissued equity awards  (e.g., "Unvested RSUs may not be pledged...")
+    • LLC/partnership units   (e.g., "Members may not transfer their Units...")
+    • A specific large shareholder defined by ownership percentage
+                          (e.g., "Any 5% Stockholder may not pledge shares...")
+    • SPAC sponsors or IPO-bound individuals under a one-time lock-up agreement
+                          (e.g., "Sponsors may not pledge shares until 180 days after IPO...")
 
-  A. Ownership disclosure / current status
-     "X shares pledged as collateral" / "No executive has pledged any shares"
-     → Describes facts, not rules. Even a negative statement ("no one has pledged")
-       is a disclosure, not a prohibition.
+FILTER 2 — Wrong type: the passage is a factual statement, not a policy rule.
+  A relevant passage states a rule about what insiders must or must not do.
+  IGNORE a passage if it is instead:
+    • A disclosure of current facts  (e.g., "No shares are currently pledged.")
+    • A loan contract trigger clause (e.g., "If participant pledges shares,
+      interest rate will be adjusted...")
+    • An explicit statement that no restriction exists
+                          (e.g., "We do not restrict pledging.")
 
-  B. Equity award / stock plan transferability
-     "Participant may not sell, transfer, or pledge unvested RSUs/options/grants"
-     → Plan-level transfer restriction on unissued instruments. The subject is the
-       award itself, not the person's freely-held shares. NOT a trading policy.
-
-  C. Fund-level operating restrictions
-     "No margin accounts in the name of the Fund" / "Fund may not pledge its assets"
-     → Applies to the fund entity's assets, not to individual insiders. NOT a trading policy.
-
-  D. Investment advisory agreements (Fund Advisor contracts)
-     "The Advisor agrees that neither it nor its employees shall pledge the Fund's assets"
-     → Restricts the fund manager's use of fund assets, not personal securities trading.
-
-  E. LLC / Partnership operating agreements
-     "Section 9 requires Director consent for any pledge of Units"
-     → Governs membership unit transfers within an LLC/partnership structure. NOT a trading policy.
-
-  F. Loan Program pledge clauses
-     "Interest rate adjusts if participant sells or pledges shares under the Loan Program"
-     → A loan contract trigger clause, not a prohibition on pledging.
-
-  G. SPAC / IPO lock-up / Transfer Restriction agreements
-     "Sponsors agreed not to pledge during lock-up"
-     "Transfer Restrictions: covered managing directors agree not to transfer shares until [date]"
-     → IGNORE only when ALL THREE conditions are met:
-       (1) The subject is SPAC sponsors, or specific individuals bound by an IPO/listing event
-       (2) The restriction is triggered by a one-time event (IPO, merger, acquisition)
-       (3) The passage contains a specific end date or phrase like "until the consummation of"
-     → If the passage applies to all officers/directors as a standing company policy,
-       it is NOT a lock-up — do NOT ignore it. Classify normally.
-
-  H. REIT / company portfolio investment restrictions (Articles of Incorporation)
-     "The Company shall not make investments in: (i) foreign currency; (ii) short sales..."
-     → IGNORE only when the restriction applies to the COMPANY's own investment portfolio
-       (e.g., what assets the company as an entity may hold or trade).
-     → If the restriction applies to INDIVIDUAL insiders (officers, directors, employees)
-       and their personal trading of company securities, do NOT ignore it. Classify normally.
-     → Key signal for noise: subject is "the Company" making investments, not a person trading.
-
-  I. Shareholder / Member agreements
-     "5% Stockholder cannot purchase, sell, pledge... without Board approval"
-     → IGNORE only when the restriction targets a SPECIFIC SHAREHOLDER CATEGORY defined
-       by ownership threshold (e.g., 5% stockholder, 10% holder, controlling shareholder)
-       or membership in an LLC/partnership (e.g., Members, Unit holders).
-     → If the restriction applies broadly to officers and directors (even with approval
-       requirements), do NOT ignore it — that is label 2. Classify normally.
-     → Key signal for noise: subject is defined by ownership percentage or entity membership,
-       not by job title (officer, director, employee).
-
-  J. Statement explicitly saying no prohibition exists
-     "We do not restrict pledges but require pre-clearance"
-     → IGNORE only when the passage explicitly states there is NO prohibition on pledging
-       or hedging. Pre-clearance alone, with no prohibition, means label 0.
-     → CRITICAL: Do NOT confuse this with label 2.
-       - Label 0 (ignore): "We do not prohibit pledging, but require pre-clearance" —
-         the company explicitly says there is no ban.
-       - Label 2 (classify): "Pledging is prohibited unless pre-approved by General Counsel" —
-         there IS a prohibition, but exceptions can be granted.
-     → The key question: does the passage say pledging/hedging is PROHIBITED?
-       If yes → label 1 or 2. If no prohibition language exists → label 0.
+If a passage passes both filters → it is relevant. Proceed to Step 2.
 
 ════════════════════════════════════════════════════════════
 STEP 2 — CLASSIFY: LABEL THE POLICY
 ════════════════════════════════════════════════════════════
 
-After filtering noise, classify based only on passages that are genuine insider
-trading / securities trading policies.
+Classify based only on passages that passed Step 1.
 
 --- LABELS ---
 
@@ -171,24 +126,24 @@ is_Pledge3 (Anti-Hedging):
   Does a formal policy prohibit insiders from hedging company securities
   (e.g., short sales, collars, swaps, forwards, puts, calls)?
 
-  0 = No policy found (or all passages were noise — see Step 1)
-  1 = Strict prohibition, no exceptions
-  2 = Prohibited but exceptions / pre-approval permitted
+  0 = No relevant policy found
+  1 = Prohibited, no exceptions allowed
+  2 = Prohibited, but exceptions or pre-approval are permitted
 
 --- RULES ---
 
-→ Label 1: passage explicitly says insiders are "prohibited," "may not," "shall not,"
-  "are not permitted" to pledge or hedge.
+→ Label 1: passage says insiders "are prohibited," "may not," "shall not," or
+  "are not permitted" to pledge or hedge, with no exception process mentioned.
   - Banning margin accounts = anti-pledging (label 1), even without the word "pledge."
 
-→ Label 2: prohibited BUT a pre-approval or exception process exists
-  ("unless pre-approved," "subject to prior approval," "with General Counsel consent").
-  - Pre-approval process = label 2, not label 1.
-  - Pre-clearance ALONE with no prohibition language = label 0, not label 2.
+→ Label 2: there IS a prohibition, but an exception or pre-approval process exists.
+  ("unless pre-approved," "subject to prior approval," "with General Counsel consent")
+  - IMPORTANT: pre-clearance or approval alone, with no prohibition language = label 0,
+    not label 2. The prohibition must be present.
 
-→ Label 0: all passages were noise (Step 1), OR no prohibition language found.
+→ Label 0: no relevant passage found after filtering, OR no prohibition language found.
 
---- POLICY QUALITY (only fill when is_Pledge2 or is_Pledge3 ≥ 1; else null) ---
+--- POLICY QUALITY (fill only when is_Pledge2 or is_Pledge3 ≥ 1; else set null) ---
 
 breadth — who is covered?
   1 = All employees / firm-wide
