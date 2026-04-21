@@ -13,6 +13,7 @@ SEC DEF 14A 質押／避險政策分類器
   v3 - 補充 6 條 DISCARD_PATTERN
   v4 - 移除 DISCARD_PATTERN，改由 LLM system prompt 統一處理噪音判斷
        好處：不需要再手動維護 Regex pattern，新年份遇到新噪音只需補充 prompt 描述
+  v5 - 修正 prompt 中 G、H、I、J 四條噪音規則，避免誤將 label 1/2 當成噪音略過
 """
 
 import re
@@ -117,20 +118,42 @@ and treat them as if they do not exist when classifying:
   G. SPAC / IPO lock-up / Transfer Restriction agreements
      "Sponsors agreed not to pledge during lock-up"
      "Transfer Restrictions: covered managing directors agree not to transfer shares until [date]"
-     → Contractual lock-up obligations tied to a specific event/date. NOT a company trading policy.
+     → IGNORE only when ALL THREE conditions are met:
+       (1) The subject is SPAC sponsors, or specific individuals bound by an IPO/listing event
+       (2) The restriction is triggered by a one-time event (IPO, merger, acquisition)
+       (3) The passage contains a specific end date or phrase like "until the consummation of"
+     → If the passage applies to all officers/directors as a standing company policy,
+       it is NOT a lock-up — do NOT ignore it. Classify normally.
 
   H. REIT / company portfolio investment restrictions (Articles of Incorporation)
      "The Company shall not make investments in: (i) foreign currency; (ii) short sales..."
-     → Restricts the company's own investment activity, not individual insider trading.
+     → IGNORE only when the restriction applies to the COMPANY's own investment portfolio
+       (e.g., what assets the company as an entity may hold or trade).
+     → If the restriction applies to INDIVIDUAL insiders (officers, directors, employees)
+       and their personal trading of company securities, do NOT ignore it. Classify normally.
+     → Key signal for noise: subject is "the Company" making investments, not a person trading.
 
   I. Shareholder / Member agreements
-     "Shareholder shall not encumber or pledge Stock except with written consent"
      "5% Stockholder cannot purchase, sell, pledge... without Board approval"
-     → Contractual restrictions on specific shareholders, not a company insider trading policy.
+     → IGNORE only when the restriction targets a SPECIFIC SHAREHOLDER CATEGORY defined
+       by ownership threshold (e.g., 5% stockholder, 10% holder, controlling shareholder)
+       or membership in an LLC/partnership (e.g., Members, Unit holders).
+     → If the restriction applies broadly to officers and directors (even with approval
+       requirements), do NOT ignore it — that is label 2. Classify normally.
+     → Key signal for noise: subject is defined by ownership percentage or entity membership,
+       not by job title (officer, director, employee).
 
-  J. Pre-clearance only, no prohibition
+  J. Statement explicitly saying no prohibition exists
      "We do not restrict pledges but require pre-clearance"
-     → Explicitly states no prohibition exists. No policy to classify.
+     → IGNORE only when the passage explicitly states there is NO prohibition on pledging
+       or hedging. Pre-clearance alone, with no prohibition, means label 0.
+     → CRITICAL: Do NOT confuse this with label 2.
+       - Label 0 (ignore): "We do not prohibit pledging, but require pre-clearance" —
+         the company explicitly says there is no ban.
+       - Label 2 (classify): "Pledging is prohibited unless pre-approved by General Counsel" —
+         there IS a prohibition, but exceptions can be granted.
+     → The key question: does the passage say pledging/hedging is PROHIBITED?
+       If yes → label 1 or 2. If no prohibition language exists → label 0.
 
 ════════════════════════════════════════════════════════════
 STEP 2 — CLASSIFY: LABEL THE POLICY
