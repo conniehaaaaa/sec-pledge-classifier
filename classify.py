@@ -16,6 +16,9 @@ SEC DEF 14A 質押／避險政策分類器
   v5 - 修正 prompt 中 G、H、I、J 四條噪音規則
   v6 - 將 A-J 十條細則收斂為兩條核心原則（Filter 1: 對象是誰、Filter 2: 是規定還是事實）
        大幅簡化 prompt，降低錯殺忠臣的風險
+  v7 - strength 分數方向改為越嚴謹分數越高（1=弱、2=中、3=強）
+  v8 - 採用老師修訂版 Filter：移除「5% Stockholder」噪音規則（此類應正常分類）
+       Filter 1、Filter 2 措辭更新為老師版本
 """
 
 import re
@@ -88,23 +91,20 @@ Before classifying, apply these two filters. If EITHER filter applies, ignore th
 passage entirely — treat it as if it does not exist.
 
 FILTER 1 — Wrong subject: the restriction does not apply to individual insiders.
-  A relevant passage restricts what individual insiders (employees, officers,
-  directors) may do with their own company securities.
-  IGNORE a passage if the subject is any of the following instead:
-    • The company itself  (e.g., "The Company shall not invest in short sales...")
+  A relevant passage restricts what individual insiders (employees, officers, directors) may do with their own company securities.
+  IGNORE a passage if the restriction instead applies to any of the following:
+    • The company itself  (e.g., "The Company shall not engage in short sales...")
     • A fund entity       (e.g., "The Fund may not pledge its assets...")
-    • Unissued equity awards  (e.g., "Unvested RSUs may not be pledged...")
+    • Unissued or unvested equity awards (e.g., "Unvested RSUs may not be pledged...")
     • LLC/partnership units   (e.g., "Members may not transfer their Units...")
-    • A specific large shareholder defined by ownership percentage
-                          (e.g., "Any 5% Stockholder may not pledge shares...")
-    • SPAC sponsors or IPO-bound individuals under a one-time lock-up agreement
+    • SPAC sponsors or IPO-bound individuals subject to a one-time lock-up agreement
                           (e.g., "Sponsors may not pledge shares until 180 days after IPO...")
 
 FILTER 2 — Wrong type: the passage is a factual statement, not a policy rule.
-  A relevant passage states a rule about what insiders must or must not do.
-  IGNORE a passage if it is instead:
+  A relevant passage states a rule about what insiders may or may not do.
+  IGNORE a passage if it is instead any of the following:
     • A disclosure of current facts  (e.g., "No shares are currently pledged.")
-    • A loan contract trigger clause (e.g., "If participant pledges shares,
+    • A loan contract trigger clause (e.g., "If a participant pledges shares,
       interest rate will be adjusted...")
     • An explicit statement that no restriction exists
                           (e.g., "We do not restrict pledging.")
@@ -150,10 +150,10 @@ breadth — who is covered?
   2 = Directors and executive officers / senior management only
   3 = Narrow group only (NEOs, specific named individuals)
 
-strength — how binding is the language?
-  1 = Strong:   "prohibited," "may not," "shall not," "are not permitted"
+strength — how binding is the language? (higher = stricter)
+  1 = Weak:     "discouraged," "should not," "not recommended"
   2 = Moderate: "generally prohibits," "not permitted without approval," "subject to pre-clearance"
-  3 = Weak:     "discouraged," "should not," "not recommended"
+  3 = Strong:   "prohibited," "may not," "shall not," "are not permitted"
 
 ════════════════════════════════════════════════════════════
 OUTPUT
