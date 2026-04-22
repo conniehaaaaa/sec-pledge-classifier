@@ -1,6 +1,7 @@
 """
-用 206_withURL.xlsx 裡的 URL 重新爬取並分類
-輸出：206_rerun_result.xlsx
+v2 - 修正 Filter 2 誤殺真正禁止條款的問題
+新增 CRITICAL OVERRIDE：只要有明確禁止語言且對象是 insider，一律分類不過濾
+修正 pre-clearance 判斷：pre-clearance = label 2（不是 0）
 """
 
 import re
@@ -19,10 +20,10 @@ load_dotenv()
 # 設定區
 # ══════════════════════════════════════════════════════════════════
 
-INPUT_FILE      = '2006_withURL.xlsx'
-OUTPUT_FILE     = '2006_rerun_result.xlsx'
-CHECKPOINT_FILE = '2006_checkpoint.xlsx'
-PROCESSED_FILE  = '2006_processed.txt'
+INPUT_FILE      = '206_withURL.xlsx'
+OUTPUT_FILE     = '206_rerun_result_v2.xlsx'
+CHECKPOINT_FILE = '206_checkpoint_v2.xlsx'
+PROCESSED_FILE  = '206_processed_v2.txt'
 SAVE_EVERY      = 20
 
 # ══════════════════════════════════════════════════════════════════
@@ -40,35 +41,42 @@ V5_PATTERN = re.compile(
 )
 
 # ══════════════════════════════════════════════════════════════════
-# LLM System Prompt
+# LLM System Prompt v2
+# 主要修改：
+#   1. CRITICAL OVERRIDE：有明確禁止語言 + 對象是 insider → 一律分類，不過濾
+#   2. Filter 1 補充「prohibits us from」範例，避免誤殺公司本身政策
+#   2. pre-clearance alone = label 2（原本是 0，這樣太嚴）
 # ══════════════════════════════════════════════════════════════════
 
 SYSTEM_PROMPT = """You are a finance professor and analyst specializing in anti-hedging and anti-pledging policies disclosed in SEC DEF 14A filings available through the EDGAR database.
 
 ## STEP 1 — FILTER (ignore passage if either applies)
 FILTER 1 — Classify the passage as the wrong subject if the restriction does not apply to corporate insiders.
-IGNORE if it applies to: the company itself, a fund entity, unissued/unvested equity, LLC/partnership units, or SPAC sponsors under a one-time IPO lock-up.
+IGNORE if it applies to: the company itself (e.g., "prohibits us from"), a fund entity, unissued/unvested equity, LLC/partnership units, or SPAC sponsors under a one-time IPO lock-up.
 
-FILTER 2 — Classify the passage as a wrong type if the statement is not a policy rule. 
-IGNORE if it is: a factual disclosure, a loan contract trigger clause, or an explicit statement that no restrictions on pledging or hedging exists.
+FILTER 2 — Classify the passage as a wrong type if the statement is not a policy rule.
+IGNORE if it is: a factual disclosure of current holdings (e.g., "no shares have been pledged"), a loan contract trigger clause, or an explicit statement that no restrictions exist.
+
+CRITICAL OVERRIDE — Do NOT apply either filter if the passage contains explicit prohibition language directed at insiders:
+- Keywords: "may not," "shall not," "are not permitted," "are prohibited," "are not allowed," "prohibit," "do not permit"
+- If these words appear AND the subject is employees / officers / directors / senior management / insiders → this is always a policy rule, classify it regardless of other context.
 
 ## STEP 2 — CLASSIFY
 **is_Pledge2** (Anti-Pledging): formal policy prohibits insiders from pledging shares as collateral.
-**is_Pledge3** (Anti-Hedging): formal policy prohibits hedging (e.g., puts, calls, swaps, collars, forwards).
+**is_Pledge3** (Anti-Hedging): formal policy prohibits hedging (e.g., short sales, puts, calls, swaps, collars, forwards, derivatives).
 
 Values: 0 = no relevant policy | 1 = prohibited, no exceptions | 2 = prohibited with exceptions/pre-approval
 
 Rules:
-- Label 1: passage says insiders "are prohibited," "may not," "shall not," or
-  "are not permitted" to pledge or hedge, with no exception process mentioned.
+- Label 1: passage says insiders "are prohibited," "may not," "shall not," or "are not permitted" to pledge or hedge, with no exception process mentioned.
   Note: banning margin accounts = anti-pledging, label 1.
 - Label 2: prohibition exists AND exception or pre-approval process is mentioned.
-  Note: pre-clearance alone with NO prohibition language = label 0, not label 2.
+  Note: pre-clearance requirement alone (even with no explicit prohibition word) = label 2, because requiring approval implies restriction.
 - Label 0: no relevant passage after filtering, or no prohibition language.
 
 ## STEP 3 — POLICY QUALITY (only when is_Pledge2 or is_Pledge3 ≥ 1; else null)
 
-breadth: 1 = narrow (NEOs, specific individual) | 2 = directors & executive officers  | 3 = all employees/firm-wide 
+breadth: 1 = narrow (NEOs, specific individual) | 2 = directors & executive officers | 3 = all employees/firm-wide
 strength: 1 = weak ("discouraged") | 2 = moderate ("generally prohibits," "subject to pre-clearance") | 3 = strong ("prohibited," "may not," "shall not")
 
 ## OUTPUT — valid JSON only, no markdown:
@@ -140,10 +148,10 @@ filed by CIK={cik} on {filedate}.
 
 They were selected by a keyword filter (Regex) for containing words like
 "pledge," "hedge," "margin," "derivative," "short sale," or "collateral."
-The passages may include both genuine insider trading policies AND noise
-(disclosures, plan documents, fund agreements, etc.).
+The passages may include both genuine insider trading policies AND noise.
 
 Please apply Step 1 (filter noise) and Step 2 (classify) as instructed.
+Remember the CRITICAL OVERRIDE: if you see explicit prohibition language targeting employees/officers/directors, always classify — do not filter.
 
 --- EXTRACTED PASSAGES ---
 {passages[:8000]}
@@ -200,7 +208,6 @@ print(f"讀取 {INPUT_FILE} ...")
 df = pd.read_excel(INPUT_FILE)
 print(f"共 {len(df)} 筆")
 
-# 斷點續跑
 results   = pd.read_excel(CHECKPOINT_FILE).to_dict('records') if os.path.exists(CHECKPOINT_FILE) else []
 done_urls = set(open(PROCESSED_FILE).read().splitlines()) if os.path.exists(PROCESSED_FILE) else set()
 print(f"已處理：{len(done_urls)} 筆")
@@ -213,7 +220,7 @@ for i, row in df.iterrows():
     url      = row.get('filename', '')
 
     if pd.isna(url) or str(url).strip() == '':
-        print(f"\n[{i+1}/{len(df)}] CIK={cik}   無 URL，跳過")
+        print(f"\n[{i+1}/{len(df)}] CIK={cik}  ⚠️ 無 URL，跳過")
         continue
 
     if url in done_urls:
@@ -230,7 +237,7 @@ for i, row in df.iterrows():
     passages, hit_count = extract_relevant_passages(raw_html)
     print(f"  Regex 命中 {hit_count} 個區塊，擷取 {len(passages)} 字元")
 
-    res            = classify_with_llm(passages, cik, filedate)
+    res = classify_with_llm(passages, cik, filedate)
     ai_p2          = res.get('is_Pledge2', -1)
     ai_p3          = res.get('is_Pledge3', -1)
     ai_p2_breadth  = res.get('Pledge2_breadth')
