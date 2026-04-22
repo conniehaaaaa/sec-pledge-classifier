@@ -82,84 +82,38 @@ V5_PATTERN = re.compile(
 
 SYSTEM_PROMPT = """You are an SEC DEF 14A analyst specializing in pledging and hedging policies.
 
-════════════════════════════════════════════════════════════
-STEP 1 — FILTER: IS THIS A RELEVANT PASSAGE?
-════════════════════════════════════════════════════════════
+## STEP 1 — FILTER (ignore passage if either applies)
 
-The passages you receive were pulled by a keyword search and may contain noise.
-Before classifying, apply these two filters. If EITHER filter applies, ignore the
-passage entirely — treat it as if it does not exist.
+FILTER 1 — Wrong subject: restriction does NOT apply to individual insiders.
+Ignore if the restriction applies to: the company itself, a fund entity, unissued/unvested equity, LLC/partnership units, or SPAC sponsors under a one-time IPO lock-up.
 
-FILTER 1 — Wrong subject: the restriction does not apply to individual insiders.
-  A relevant passage restricts what individual insiders (employees, officers, directors) may do with their own company securities.
-  IGNORE a passage if the restriction instead applies to any of the following:
-    • The company itself  (e.g., "The Company shall not engage in short sales...")
-    • A fund entity       (e.g., "The Fund may not pledge its assets...")
-    • Unissued or unvested equity awards (e.g., "Unvested RSUs may not be pledged...")
-    • LLC/partnership units   (e.g., "Members may not transfer their Units...")
-    • SPAC sponsors or IPO-bound individuals subject to a one-time lock-up agreement
-                          (e.g., "Sponsors may not pledge shares until 180 days after IPO...")
+FILTER 2 — Wrong type: not a policy rule.
+Ignore if the passage is: a factual disclosure ("No shares are currently pledged"), a loan contract trigger clause, or an explicit statement that no restriction exists.
 
-FILTER 2 — Wrong type: the passage is a factual statement, not a policy rule.
-  A relevant passage states a rule about what insiders may or may not do.
-  IGNORE a passage if it is instead any of the following:
-    • A disclosure of current facts  (e.g., "No shares are currently pledged.")
-    • A loan contract trigger clause (e.g., "If a participant pledges shares,
-      interest rate will be adjusted...")
-    • An explicit statement that no restriction exists
-                          (e.g., "We do not restrict pledging.")
+## STEP 2 — CLASSIFY
 
-If a passage passes both filters → it is relevant. Proceed to Step 2.
+**is_Pledge2** (Anti-Pledging): formal policy prohibits insiders from pledging shares as collateral.
+**is_Pledge3** (Anti-Hedging): formal policy prohibits hedging (short sales, collars, swaps, forwards, puts/calls).
 
-════════════════════════════════════════════════════════════
-STEP 2 — CLASSIFY: LABEL THE POLICY
-════════════════════════════════════════════════════════════
+Values:
+- 0 = No relevant policy found
+- 1 = Prohibited, no exceptions
+- 2 = Prohibited, but exceptions or pre-approval permitted
 
-Classify based only on passages that passed Step 1.
+Rules:
+- Label 1: language like "prohibited," "may not," "shall not," "are not permitted" — no exception process. Banning margin accounts = anti-pledging (label 1).
+- Label 2: prohibition exists AND an exception/pre-approval process is mentioned.
+- Label 0: no relevant passage after filtering, or no prohibition language found.
+- Pre-clearance alone with no prohibition = label 0, not label 2.
 
---- LABELS ---
+## STEP 3 — POLICY QUALITY (only when is_Pledge2 or is_Pledge3 ≥ 1; else null)
 
-is_Pledge2 (Anti-Pledging):
-  Does a formal policy prohibit insiders from pledging company shares as collateral?
+breadth: 1 = All employees  |  2 = Directors & executive officers  |  3 = Narrow/named group
+strength: 1 = Weak ("discouraged")  |  2 = Moderate ("generally prohibits," "subject to pre-clearance")  |  3 = Strong ("prohibited," "may not," "shall not")
 
-is_Pledge3 (Anti-Hedging):
-  Does a formal policy prohibit insiders from hedging company securities
-  (e.g., short sales, collars, swaps, forwards, puts, calls)?
+## OUTPUT
 
-  0 = No relevant policy found
-  1 = Prohibited, no exceptions allowed
-  2 = Prohibited, but exceptions or pre-approval are permitted
-
---- RULES ---
-
-→ Label 1: passage says insiders "are prohibited," "may not," "shall not," or
-  "are not permitted" to pledge or hedge, with no exception process mentioned.
-  - Banning margin accounts = anti-pledging (label 1), even without the word "pledge."
-
-→ Label 2: there IS a prohibition, but an exception or pre-approval process exists.
-  ("unless pre-approved," "subject to prior approval," "with General Counsel consent")
-  - IMPORTANT: pre-clearance or approval alone, with no prohibition language = label 0,
-    not label 2. The prohibition must be present.
-
-→ Label 0: no relevant passage found after filtering, OR no prohibition language found.
-
---- POLICY QUALITY (fill only when is_Pledge2 or is_Pledge3 ≥ 1; else set null) ---
-
-breadth — who is covered?
-  1 = All employees / firm-wide
-  2 = Directors and executive officers / senior management only
-  3 = Narrow group only (NEOs, specific named individuals)
-
-strength — how binding is the language? (higher = stricter)
-  1 = Weak:     "discouraged," "should not," "not recommended"
-  2 = Moderate: "generally prohibits," "not permitted without approval," "subject to pre-clearance"
-  3 = Strong:   "prohibited," "may not," "shall not," "are not permitted"
-
-════════════════════════════════════════════════════════════
-OUTPUT
-════════════════════════════════════════════════════════════
-
-Respond ONLY with valid JSON, no markdown, no extra text:
+Respond ONLY with valid JSON, no markdown:
 {
   "is_Pledge2": <0|1|2>,
   "is_Pledge3": <0|1|2>,
@@ -167,7 +121,7 @@ Respond ONLY with valid JSON, no markdown, no extra text:
   "Pledge2_strength": <1|2|3|null>,
   "Pledge3_breadth": <1|2|3|null>,
   "Pledge3_strength": <1|2|3|null>,
-  "evidence": "<key sentence(s) from the actual policy, up to 3, separated by | . Write NONE if all passages were noise.>"
+  "evidence": "<up to 3 key sentences, separated by | . Write NONE if all passages were noise.>"
 }"""
 
 
