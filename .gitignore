@@ -5,9 +5,13 @@
 # *.xlsx
 *.xls
 *.csv
+*.XLSX
+
 
 # 輸出結果
 LLM分類結果.xlsx
+mapping.py
+CYZ_DEF14A.xlsx
 
 # Python
 __pycache__/

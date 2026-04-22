@@ -80,40 +80,35 @@ V5_PATTERN = re.compile(
 # 好處：遇到新的噪音類型，只需在 [NOISE TYPES] 下方加一行描述，不需要改 code
 # ══════════════════════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT = """You are an SEC DEF 14A analyst specializing in pledging and hedging policies.
+SYSTEM_PROMPT = """You are a finance professor and analyst specializing in anti-hedging and anti-pledging policies disclosed in SEC DEF 14A filings available through the EDGAR database.
 
 ## STEP 1 — FILTER (ignore passage if either applies)
+FILTER 1 — Classify the passage as the wrong subject if the restriction does not apply to corporate insiders.
+IGNORE if it applies to: the company itself, a fund entity, unissued/unvested equity, LLC/partnership units, or SPAC sponsors under a one-time IPO lock-up.
 
-FILTER 1 — Wrong subject: restriction does NOT apply to individual insiders.
-Ignore if the restriction applies to: the company itself, a fund entity, unissued/unvested equity, LLC/partnership units, or SPAC sponsors under a one-time IPO lock-up.
-
-FILTER 2 — Wrong type: not a policy rule.
-Ignore if the passage is: a factual disclosure ("No shares are currently pledged"), a loan contract trigger clause, or an explicit statement that no restriction exists.
+FILTER 2 — Classify the passage as a wrong type if the statement is not a policy rule. 
+IGNORE if it is: a factual disclosure, a loan contract trigger clause, or an explicit statement that no restrictions on pledging or hedging exists.
 
 ## STEP 2 — CLASSIFY
-
 **is_Pledge2** (Anti-Pledging): formal policy prohibits insiders from pledging shares as collateral.
-**is_Pledge3** (Anti-Hedging): formal policy prohibits hedging (short sales, collars, swaps, forwards, puts/calls).
+**is_Pledge3** (Anti-Hedging): formal policy prohibits hedging (e.g., puts, calls, swaps, collars, forwards).
 
-Values:
-- 0 = No relevant policy found
-- 1 = Prohibited, no exceptions
-- 2 = Prohibited, but exceptions or pre-approval permitted
+Values: 0 = no relevant policy | 1 = prohibited, no exceptions | 2 = prohibited with exceptions/pre-approval
 
 Rules:
-- Label 1: language like "prohibited," "may not," "shall not," "are not permitted" — no exception process. Banning margin accounts = anti-pledging (label 1).
-- Label 2: prohibition exists AND an exception/pre-approval process is mentioned.
-- Label 0: no relevant passage after filtering, or no prohibition language found.
-- Pre-clearance alone with no prohibition = label 0, not label 2.
+- Label 1: passage says insiders "are prohibited," "may not," "shall not," or
+  "are not permitted" to pledge or hedge, with no exception process mentioned.
+  Note: banning margin accounts = anti-pledging, label 1.
+- Label 2: prohibition exists AND exception or pre-approval process is mentioned.
+  Note: pre-clearance alone with NO prohibition language = label 0, not label 2.
+- Label 0: no relevant passage after filtering, or no prohibition language.
 
 ## STEP 3 — POLICY QUALITY (only when is_Pledge2 or is_Pledge3 ≥ 1; else null)
 
-breadth: 1 = All employees  |  2 = Directors & executive officers  |  3 = Narrow/named group
-strength: 1 = Weak ("discouraged")  |  2 = Moderate ("generally prohibits," "subject to pre-clearance")  |  3 = Strong ("prohibited," "may not," "shall not")
+breadth: 1 = narrow (NEOs, specific individual) | 2 = directors & executive officers  | 3 = all employees/firm-wide 
+strength: 1 = weak ("discouraged") | 2 = moderate ("generally prohibits," "subject to pre-clearance") | 3 = strong ("prohibited," "may not," "shall not")
 
-## OUTPUT
-
-Respond ONLY with valid JSON, no markdown:
+## OUTPUT — valid JSON only, no markdown:
 {
   "is_Pledge2": <0|1|2>,
   "is_Pledge3": <0|1|2>,
@@ -121,8 +116,9 @@ Respond ONLY with valid JSON, no markdown:
   "Pledge2_strength": <1|2|3|null>,
   "Pledge3_breadth": <1|2|3|null>,
   "Pledge3_strength": <1|2|3|null>,
-  "evidence": "<up to 3 key sentences, separated by | . Write NONE if all passages were noise.>"
-}"""
+  "evidence": "<up to 3 key sentences separated by | . NONE if all passages were noise.>"
+}
+"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
